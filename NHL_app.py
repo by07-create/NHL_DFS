@@ -3,13 +3,14 @@ import streamlit as st
 import pandas as pd
 import requests
 from bs4 import BeautifulSoup
-import time, re
+import time
+import re
 
 # --- Config ---
 FANTASYDATA_SCHEDULE_URL = "https://fantasydata.com/nhl/schedule"
 REQUESTS_TIMEOUT = 10
 HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; StreamlitApp/1.0)"}
-REQUEST_DELAY = 0.5
+REQUEST_DELAY = 0.5  # polite delay
 
 # --- MoneyPuck CSV URLs ---
 urls = {
@@ -44,6 +45,7 @@ TEAM_ABBR_MAP = {
 }
 
 def fetch_schedule():
+    """Scrape FantasyData NHL schedule and parse away/home and time"""
     try:
         r = requests.get(FANTASYDATA_SCHEDULE_URL, headers=HEADERS, timeout=REQUESTS_TIMEOUT)
         r.raise_for_status()
@@ -79,56 +81,41 @@ def fetch_schedule():
         })
     return pd.DataFrame(rows_data)
 
-# --- Conversion helpers ---
-def per_60(df):
-    if 'icetime' not in df.columns:
-        return df
-    numeric_cols = df.select_dtypes(include=['number']).columns
-    df = df.copy()
-    for col in numeric_cols:
-        if col not in ['icetime', 'games_played'] and df['icetime'].sum() > 0:
-            df[col] = (df[col] / df['icetime']) * 3600
-    return df
+# --- Streamlit App ---
+st.set_page_config(page_title="NHL High-Danger Lines", layout="wide")
+st.title("NHL Schedule → High-Danger Lines")
 
-def per_game(df):
-    if 'games_played' not in df.columns:
-        return df
-    numeric_cols = df.select_dtypes(include=['number']).columns
-    df = df.copy()
-    for col in numeric_cols:
-        if col != 'games_played' and df['games_played'].sum() > 0:
-            df[col] = df[col] / df['games_played']
-    return df
-
-# --- Streamlit ---
-st.set_page_config(page_title="NHL Schedule & High-Danger Lines", layout="wide")
-st.title("NHL Schedule → High-Danger Lines (Per 60 Normalized)")
-
-# Load Data
+# Load MoneyPuck data
 lines = load_csv(urls['Lines'])
 goalies = load_csv(urls['Goalies'])
 teams = load_csv(urls['Teams'])
 
-if not lines.empty and lines.shape[1] >= 4:
-    lines['team_abbr'] = lines.iloc[:, 3].astype(str).str.upper()
+if lines.empty:
+    st.warning("Lines data missing.")
 else:
-    lines['team_abbr'] = ""
+    st.success("Loaded Lines data.")
+    if lines.shape[1] >= 4:
+        lines['team_abbr'] = lines.iloc[:, 3].astype(str).str.upper()
+    else:
+        lines['team_abbr'] = ""
 
+# Fetch schedule
 schedule_df = fetch_schedule()
-
 if schedule_df.empty:
     st.warning("No games today.")
 else:
     st.header("Today's Schedule")
     st.dataframe(schedule_df)
 
-    # --- Raw Data ---
-    with st.expander("Raw Data (Per 60 and Per Game Adjusted)"):
-        tabs = st.tabs(["Lines (per 60)", "Goalies (per game)", "Teams (per game)"])
+    # -------------------------
+    # Raw Data (expander with tabs)
+    # -------------------------
+    with st.expander("Raw Data (Full stats)"):
+        tabs = st.tabs(["Lines", "Goalies", "Teams"])
 
-        # Lines
+        # ---------- LINES TAB ----------
         with tabs[0]:
-            st.subheader("Lines – Per 60 (using icetime)")
+            st.subheader("Lines (per 60)")
             line_cols = [
                 'name','team','position','situation','games_played','icetime',
                 'xGoalsPercentage','xGoalsFor','xReboundsFor','shotsOnGoalFor','goalsFor',
@@ -137,74 +124,120 @@ else:
                 'goalsAgainst','highDangerShotsAgainst','highDangerxGoalsAgainst',
                 'highDangerGoalsAgainst','reboundxGoalsAgainst'
             ]
-            lines_per60 = per_60(lines)
-            show_cols = [c for c in line_cols if c in lines_per60.columns]
-            st.dataframe(lines_per60[show_cols].fillna("N/A"))
+            line_cols = [c for c in line_cols if c in lines.columns]
 
-        # Goalies
+            if lines.empty:
+                st.write("Lines CSV didn't load or is empty.")
+            else:
+                lines_copy = lines.copy()
+                if 'position' in lines_copy.columns:
+                    lines_copy['position'] = lines_copy['position'].astype(str)
+                    # convert all stats to per 60 minutes
+                    if 'icetime' in lines_copy.columns:
+                        icetime_sec = lines_copy['icetime'].replace(0, pd.NA)
+                        for c in line_cols:
+                            if c not in ['name','team','position','situation','games_played','icetime']:
+                                if c in lines_copy.columns:
+                                    lines_copy[c] = lines_copy[c] / icetime_sec * 3600
+
+                    lines_lines = lines_copy[lines_copy['position'].str.lower().str.contains('line', na=False)]
+                    lines_pair = lines_copy[lines_copy['position'].str.lower().str.contains('pair', na=False)]
+                    others = lines_copy[~(lines_copy.index.isin(lines_lines.index) | lines_copy.index.isin(lines_pair.index))]
+
+                    if not lines_lines.empty:
+                        st.markdown("**Forward Lines / Line rows**")
+                        st.dataframe(lines_lines[line_cols].fillna("N/A"))
+                    if not lines_pair.empty:
+                        st.markdown("**Defensive Pairings / Pairing rows**")
+                        st.dataframe(lines_pair[line_cols].fillna("N/A"))
+                    if not others.empty:
+                        st.markdown("**Other / Unlabeled Positions**")
+                        st.dataframe(others[line_cols].fillna("N/A"))
+                else:
+                    st.dataframe(lines_copy[line_cols].fillna("N/A"))
+
+        # ---------- GOALIES TAB ----------
         with tabs[1]:
-            st.subheader("Goalies – Per Game (by games_played)")
+            st.subheader("Goalies (per game)")
             goalie_cols = [
                 'name','team','situation','games_played','xGoals','goals',
                 'xRebounds','rebounds','highDangerShots','highDangerxGoals','highDangerGoals'
             ]
-            goalies_pg = per_game(goalies)
-            show_cols = [c for c in goalie_cols if c in goalies_pg.columns]
-            st.dataframe(goalies_pg[show_cols].fillna("N/A"))
+            goalie_cols = [c for c in goalie_cols if c in goalies.columns]
+            if not goalies.empty and 'games_played' in goalies.columns:
+                goalies_copy = goalies.copy()
+                for c in goalie_cols:
+                    if c not in ['name','team','situation','games_played'] and c in goalies_copy.columns:
+                        goalies_copy[c] = goalies_copy[c] / goalies_copy['games_played']
+                st.dataframe(goalies_copy[goalie_cols].fillna("N/A"))
+            else:
+                st.dataframe(goalies[goalie_cols].fillna("N/A"))
 
-        # Teams
+        # ---------- TEAMS TAB ----------
         with tabs[2]:
-            st.subheader("Teams – Per Game (by games_played)")
+            st.subheader("Teams (per game)")
             team_cols = [
                 'name','situation','games_played','xGoalsFor','xReboundsFor','shotsOnGoalFor',
                 'goalsFor','reboundGoalsFor','penaltiesFor','highDangerShotsFor','highDangerxGoalsFor',
                 'highDangerGoalsFor','shotsOnGoalAgainst','goalsAgainst','reboundGoalsAgainst',
                 'highDangerShotsAgainst','highDangerxGoalsAgainst','highDangerGoalsAgainst'
             ]
-            teams_pg = per_game(teams)
-            show_cols = [c for c in team_cols if c in teams_pg.columns]
-            st.dataframe(teams_pg[show_cols].fillna("N/A"))
+            team_cols = [c for c in team_cols if c in teams.columns]
+            if not teams.empty and 'games_played' in teams.columns:
+                teams_copy = teams.copy()
+                for c in team_cols:
+                    if c not in ['name','situation','games_played'] and c in teams_copy.columns:
+                        teams_copy[c] = teams_copy[c] / teams_copy['games_played']
+                st.dataframe(teams_copy[team_cols].fillna("N/A"))
+            else:
+                st.dataframe(teams[team_cols].fillna("N/A"))
 
-    # --- DFS TABLES (All Per 60) ---
-    st.subheader("All Lines Playing Today – DFS Scores (Per 60)")
+    # -------------------------
+    # All Teams DFS Table
+    # -------------------------
+    st.subheader("All Lines Playing Today – DFS Scores (per 60)")
 
-    teams_today = pd.unique(schedule_df[['home_abbr','away_abbr']].values.ravel('K'))
+    teams_today = pd.unique(schedule_df[['home_abbr', 'away_abbr']].values.ravel('K'))
     lines_today = lines[lines['team_abbr'].isin(teams_today)].copy()
 
-    if 'icetime' in lines_today.columns and 'games_played' in lines_today.columns:
-        lines_today['iceTimePerGame'] = lines_today['icetime'] / lines_today['games_played']
-        lines_today['IceTimePerGame_Minutes'] = lines_today['iceTimePerGame'] / 60
+    # convert to per 60
+    if 'icetime' in lines_today.columns:
+        icetime_sec = lines_today['icetime'].replace(0, pd.NA)
+        for c in ['highDangerxGoalsFor','highDangerShotsFor','shotsOnGoalFor','reboundsFor','reboundGoalsFor']:
+            if c in lines_today.columns:
+                lines_today[c] = lines_today[c] / icetime_sec * 3600
 
-    scoring_df = per_60(lines_today)
+    dfs_stats = ['iceTimePerGame','highDangerxGoalsFor','highDangerShotsFor','shotsOnGoalFor','reboundsFor','reboundGoalsFor']
+    lines_today['iceTimePerGame'] = lines_today['icetime'] / lines_today['games_played']
+    lines_today['IceTimePerGame_Minutes'] = lines_today['iceTimePerGame'] / 60
 
-    dfs_stats = [
-        'iceTimePerGame','highDangerxGoalsFor','highDangerShotsFor',
-        'shotsOnGoalFor','reboundsFor','reboundGoalsFor'
-    ]
-    existing_cols = [c for c in dfs_stats if c in scoring_df.columns]
+    display_cols_all = ['team_abbr','position','name','IceTimePerGame_Minutes'] + [c for c in dfs_stats if c in lines_today.columns]
+    all_dfs_df = lines_today[display_cols_all].copy()
 
     def normalize(series):
-        if series.max() == series.min():
+        if series.empty or series.max() == series.min(): 
             return series
-        return (series - series.min()) / (series.max() - series.min())
+        return (series - series.min())/(series.max() - series.min())
+    numeric_cols_all = [c for c in all_dfs_df.columns if c not in ['team_abbr','name','position','IceTimePerGame_Minutes']]
+    if numeric_cols_all:
+        all_dfs_df[numeric_cols_all] = all_dfs_df[numeric_cols_all].apply(lambda s: normalize(s))
 
-    numeric_cols = [c for c in existing_cols if c in scoring_df.columns]
-    scoring_df[numeric_cols] = scoring_df[numeric_cols].apply(normalize)
-
-    scoring_df['DFS_Score'] = (
-        0.3*scoring_df.get('iceTimePerGame',0) +
-        0.35*scoring_df.get('highDangerxGoalsFor',0) +
-        0.15*scoring_df.get('highDangerShotsFor',0) +
-        0.1*scoring_df.get('shotsOnGoalFor',0) +
-        0.05*scoring_df.get('reboundsFor',0) +
-        0.05*scoring_df.get('reboundGoalsFor',0)
+    all_dfs_df['DFS_Score'] = (
+        0.3*all_dfs_df.get('iceTimePerGame', 0) +
+        0.35*all_dfs_df.get('highDangerxGoalsFor', 0) +
+        0.15*all_dfs_df.get('highDangerShotsFor', 0) +
+        0.1*all_dfs_df.get('shotsOnGoalFor', 0) +
+        0.05*all_dfs_df.get('reboundsFor', 0) +
+        0.05*all_dfs_df.get('reboundGoalsFor', 0)
     )
 
-    scoring_df = scoring_df.sort_values('DFS_Score', ascending=False)
-    st.dataframe(scoring_df.fillna("N/A"))
+    all_dfs_df = all_dfs_df.sort_values('DFS_Score', ascending=False)
+    st.dataframe(all_dfs_df.fillna("N/A"))
 
-    # --- Matchup Table (Per 60) ---
-    matchups = [f"{r['away_abbr']} @ {r['home_abbr']} ({r['game_time']})" for _,r in schedule_df.iterrows()]
+    # -------------------------
+    # Matchup DFS Table
+    # -------------------------
+    matchups = [f"{row['away_abbr']} @ {row['home_abbr']} ({row['game_time']})" for _, row in schedule_df.iterrows()]
     selected_matchup = st.selectbox("Select a Matchup", matchups)
 
     m = re.match(r'(\w+)\s*@\s*(\w+)', selected_matchup)
@@ -212,29 +245,55 @@ else:
         away_team, home_team = m.groups()
         st.subheader(f"DFS Ratings: {home_team} vs {away_team}")
 
-        home_lines = per_60(lines[lines['team_abbr']==home_team])
-        away_lines = per_60(lines[lines['team_abbr']==away_team])
+        home_lines = lines[lines['team_abbr']==home_team].copy()
+        away_lines = lines[lines['team_abbr']==away_team].copy()
 
-        def build_scoring(df):
-            df = df.copy()
-            if 'icetime' in df.columns:
-                df = per_60(df)
+        for df in [home_lines, away_lines]:
+            df['iceTimePerGame'] = df['icetime'] / df['games_played']
+            df['IceTimePerGame_Minutes'] = df['iceTimePerGame'] / 60
+            icetime_sec = df['icetime'].replace(0, pd.NA)
+            for c in ['highDangerxGoalsFor','highDangerShotsFor','shotsOnGoalFor','reboundsFor','reboundGoalsFor']:
+                if c in df.columns:
+                    df[c] = df[c] / icetime_sec * 3600
+
+        def build_scoring_frame(df):
             return df
 
-        home = build_scoring(home_lines)
-        away = build_scoring(away_lines)
-        combined = pd.concat([home, away])
+        home_scoring = build_scoring_frame(home_lines)
+        away_scoring = build_scoring_frame(away_lines)
 
-        dfs_cols = [c for c in dfs_stats if c in combined.columns]
-        combined[dfs_cols] = combined[dfs_cols].apply(normalize)
+        combined_df = pd.concat([home_scoring[['position','name','IceTimePerGame_Minutes'] + [c for c in dfs_stats if c in home_scoring.columns]],
+                                 away_scoring[['position','name','IceTimePerGame_Minutes'] + [c for c in dfs_stats if c in away_scoring.columns]]],
+                                ignore_index=True, sort=False)
 
-        combined['DFS_Score'] = (
-            0.3*combined.get('iceTimePerGame',0) +
-            0.35*combined.get('highDangerxGoalsFor',0) +
-            0.15*combined.get('highDangerShotsFor',0) +
-            0.1*combined.get('shotsOnGoalFor',0) +
-            0.05*combined.get('reboundsFor',0) +
-            0.05*combined.get('reboundGoalsFor',0)
+        dfs_numeric_cols = [c for c in dfs_stats if c in combined_df.columns]
+        if dfs_numeric_cols:
+            combined_df[dfs_numeric_cols] = combined_df[dfs_numeric_cols].apply(lambda s: normalize(s))
+
+        combined_df['DFS_Score'] = (
+            0.3*combined_df.get('iceTimePerGame',0) +
+            0.35*combined_df.get('highDangerxGoalsFor',0) +
+            0.15*combined_df.get('highDangerShotsFor',0) +
+            0.1*combined_df.get('shotsOnGoalFor',0) +
+            0.05*combined_df.get('reboundsFor',0) +
+            0.05*combined_df.get('reboundGoalsFor',0)
         )
 
-        st.dataframe(combined[['team','position','name'] + dfs_cols + ['DFS_Score']].fillna("N/A"))
+        pos_col = 'position'
+        if pos_col in combined_df.columns:
+            combined_df[pos_col] = combined_df[pos_col].astype(str)
+            forwards_mask = combined_df[pos_col].str.lower().str.contains('line', na=False)
+            defense_mask = combined_df[pos_col].str.lower().str.contains('pair', na=False)
+
+            if forwards_mask.any():
+                st.markdown("**Forward Lines (line)**")
+                st.dataframe(combined_df[forwards_mask][['position','name','IceTimePerGame_Minutes'] + dfs_numeric_cols + ['DFS_Score']].fillna("N/A"))
+            if defense_mask.any():
+                st.markdown("**Defensive Pairings (pairing)**")
+                st.dataframe(combined_df[defense_mask][['position','name','IceTimePerGame_Minutes'] + dfs_numeric_cols + ['DFS_Score']].fillna("N/A"))
+            others = combined_df[~(forwards_mask | defense_mask)]
+            if others.shape[0] > 0:
+                st.markdown("**Other / Unlabeled**")
+                st.dataframe(others[['position','name','IceTimePerGame_Minutes'] + dfs_numeric_cols + ['DFS_Score']].fillna("N/A"))
+        else:
+            st.dataframe(combined_df[['name','IceTimePerGame_Minutes'] + dfs_numeric_cols + ['DFS_Score']].fillna("N/A"))
