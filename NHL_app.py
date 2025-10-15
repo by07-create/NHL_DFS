@@ -174,28 +174,26 @@ else:
                 st.dataframe(goalies[goalie_cols].fillna("N/A"))
 
         # ---------- TEAMS TAB ----------
-# ---------- TEAMS TAB ----------
-with tabs[2]:
-    st.subheader("Teams (per game)")
-    team_cols = [
-        'name','situation','games_played','xGoalsFor','xReboundsFor','shotsOnGoalFor',
-        'goalsFor','reboundGoalsFor','penaltiesFor','highDangerShotsFor','highDangerxGoalsFor',
-        'highDangerGoalsFor','shotsOnGoalAgainst','goalsAgainst','reboundGoalsAgainst',
-        'highDangerShotsAgainst','highDangerxGoalsAgainst','highDangerGoalsAgainst'
-    ]
-    team_cols = [c for c in team_cols if c in teams.columns]
-    if not teams.empty and 'games_played' in teams.columns:
-        teams_copy = teams.copy()
-        # ✅ keep only situation == "all"
-        if 'situation' in teams_copy.columns:
-            teams_copy = teams_copy[teams_copy['situation'].str.lower() == 'all']
-        for c in team_cols:
-            if c not in ['name','situation','games_played'] and c in teams_copy.columns:
-                teams_copy[c] = teams_copy[c] / teams_copy['games_played']
-        st.dataframe(teams_copy[team_cols].fillna("N/A"))
-    else:
-        st.dataframe(teams[team_cols].fillna("N/A"))
-
+        with tabs[2]:
+            st.subheader("Teams (per game)")
+            team_cols = [
+                'name','situation','games_played','xGoalsFor','xReboundsFor','shotsOnGoalFor',
+                'goalsFor','reboundGoalsFor','penaltiesFor','highDangerShotsFor','highDangerxGoalsFor',
+                'highDangerGoalsFor','shotsOnGoalAgainst','goalsAgainst','reboundGoalsAgainst',
+                'highDangerShotsAgainst','highDangerxGoalsAgainst','highDangerGoalsAgainst'
+            ]
+            team_cols = [c for c in team_cols if c in teams.columns]
+            if not teams.empty and 'games_played' in teams.columns:
+                teams_copy = teams.copy()
+                # ✅ keep only situation == "all"
+                if 'situation' in teams_copy.columns:
+                    teams_copy = teams_copy[teams_copy['situation'].str.lower() == 'all']
+                for c in team_cols:
+                    if c not in ['name','situation','games_played'] and c in teams_copy.columns:
+                        teams_copy[c] = teams_copy[c] / teams_copy['games_played']
+                st.dataframe(teams_copy[team_cols].fillna("N/A"))
+            else:
+                st.dataframe(teams[team_cols].fillna("N/A"))
 
     # -------------------------
     # All Teams DFS Table
