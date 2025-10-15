@@ -40,7 +40,7 @@ TEAM_ABBR_MAP = {
     "New York Islanders": "NYI","New York Rangers": "NYR","Ottawa Senators": "OTT",
     "Philadelphia Flyers": "PHI","Pittsburgh Penguins": "PIT","San Jose Sharks": "SJS",
     "Seattle Kraken": "SEA","St. Louis Blues": "STL","Tampa Bay Lightning": "TBL",
-    "Toronto Maple Leafs": "TOR","Vancouver Canucks": "VAN",“Utah Mammoth”: “UTA”,"Vegas Golden Knights": "VGK",
+    "Toronto Maple Leafs": "TOR","Vancouver Canucks": "VAN","Utah Mammoth": "UTA","Vegas Golden Knights": "VGK",
     "Washington Capitals": "WSH","Winnipeg Jets": "WPG"
 }
 
