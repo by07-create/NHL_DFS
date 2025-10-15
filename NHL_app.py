@@ -40,7 +40,7 @@ TEAM_ABBR_MAP = {
     "New York Islanders": "NYI","New York Rangers": "NYR","Ottawa Senators": "OTT",
     "Philadelphia Flyers": "PHI","Pittsburgh Penguins": "PIT","San Jose Sharks": "SJS",
     "Seattle Kraken": "SEA","St. Louis Blues": "STL","Tampa Bay Lightning": "TBL",
-    "Toronto Maple Leafs": "TOR","Vancouver Canucks":"VAN",“Utah Mammoth”:“UTA”,"Vegas Golden Knights": "VGK",
+    "Toronto Maple Leafs": "TOR","Vancouver Canucks": "VAN",“Utah Mammoth”: “UTA”,"Vegas Golden Knights": "VGK",
     "Washington Capitals": "WSH","Winnipeg Jets": "WPG"
 }
 
@@ -161,7 +161,7 @@ else:
             st.subheader("Goalies (per game)")
             goalie_cols = [
                 'name','team','situation','games_played','xGoals','goals',
-                'xRebounds','rebounds','highDangerShots','highDangerxGoals','highDangerGoals'
+                'xRebounds','rebounds','highDangerxGoals','highDangerGoals','highDangerShots'
             ]
             goalie_cols = [c for c in goalie_cols if c in goalies.columns]
             if not goalies.empty and 'games_played' in goalies.columns:
