@@ -5,6 +5,7 @@ import requests
 from bs4 import BeautifulSoup
 import time
 import re
+import datetime as dt  # ✅ added for date filtering
 
 # --- Config ---
 FANTASYDATA_SCHEDULE_URL = "https://fantasydata.com/nhl/schedule"
@@ -101,11 +102,33 @@ else:
 
 # Fetch schedule
 schedule_df = fetch_schedule()
+
+# ✅ NEW: filter to today's games only
+if not schedule_df.empty:
+    today = dt.datetime.now().date()
+
+    def parse_game_datetime(t):
+        try:
+            return dt.datetime.strptime(t, "%I:%M %p").replace(
+                year=today.year, month=today.month, day=today.day
+            )
+        except Exception:
+            return None
+
+    schedule_df["parsed_time"] = schedule_df["game_time"].apply(parse_game_datetime)
+    schedule_df = schedule_df.dropna(subset=["parsed_time"])
+
+    start = dt.datetime.combine(today, dt.time(0, 0))
+    end = start + dt.timedelta(days=1)
+    schedule_df = schedule_df[
+        (schedule_df["parsed_time"] >= start) & (schedule_df["parsed_time"] < end)
+    ]
+
 if schedule_df.empty:
     st.warning("No games today.")
 else:
     st.header("Today's Schedule")
-    st.dataframe(schedule_df)
+    st.dataframe(schedule_df.drop(columns=["parsed_time"]))
 
     # -------------------------
     # Raw Data (expander with tabs)
