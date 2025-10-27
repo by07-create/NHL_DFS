@@ -5,7 +5,7 @@ import requests
 from bs4 import BeautifulSoup
 import time
 import re
-import datetime as dt  # ✅ added for date filtering
+import datetime as dt  # ✅ added for date parsing/filtering
 
 # --- Config ---
 FANTASYDATA_SCHEDULE_URL = "https://fantasydata.com/nhl/schedule"
@@ -46,7 +46,7 @@ TEAM_ABBR_MAP = {
 }
 
 def fetch_schedule():
-    """Scrape FantasyData NHL schedule and parse away/home and time"""
+    """Scrape FantasyData NHL schedule, parse away/home/time and attach the date from header rows"""
     try:
         r = requests.get(FANTASYDATA_SCHEDULE_URL, headers=HEADERS, timeout=REQUESTS_TIMEOUT)
         r.raise_for_status()
@@ -62,25 +62,81 @@ def fetch_schedule():
         return pd.DataFrame()
 
     rows_data = []
+    current_date = None
+
+    # iterate through table rows and detect date header rows (non-game rows)
     for tr in table.find_all("tr"):
-        tds = [td.get_text(strip=True) for td in tr.find_all("td")]
-        if len(tds) < 2:
+        # If the row contains a th (often header/day row), try to parse it as a date header
+        th = tr.find("th")
+        if th:
+            header_text = th.get_text(strip=True)
+            # Try likely FantasyData date header formats, e.g. "Saturday, Oct 26" or "Oct 26, 2025"
+            parsed = None
+            for fmt in ("%A, %b %d", "%A, %B %d", "%b %d, %Y", "%B %d, %Y", "%b %d", "%B %d"):
+                try:
+                    parsed_dt = dt.datetime.strptime(header_text, fmt)
+                    # If year not provided by the header, set current year
+                    if parsed_dt.year == 1900:
+                        parsed_dt = parsed_dt.replace(year=dt.datetime.now().year)
+                    parsed = parsed_dt
+                    break
+                except Exception:
+                    continue
+            if parsed:
+                current_date = parsed.date()
             continue
-        game_str = " ".join(tds).replace("\n"," ").strip()
+
+        tds = tr.find_all("td")
+        # If there are no/too few tds, try to detect header from raw text (some pages put date in a tr without th)
+        if len(tds) == 0:
+            row_text = tr.get_text(strip=True)
+            if row_text:
+                parsed = None
+                for fmt in ("%A, %b %d", "%A, %B %d", "%b %d, %Y", "%B %d, %Y", "%b %d", "%B %d"):
+                    try:
+                        parsed_dt = dt.datetime.strptime(row_text, fmt)
+                        if parsed_dt.year == 1900:
+                            parsed_dt = parsed_dt.replace(year=dt.datetime.now().year)
+                        parsed = parsed_dt
+                        break
+                    except Exception:
+                        continue
+                if parsed:
+                    current_date = parsed.date()
+            continue
+
+        # Regular game row
+        tds_text = [td.get_text(strip=True) for td in tds]
+        if len(tds_text) < 2:
+            continue
+        game_str = " ".join(tds_text).replace("\n"," ").strip()
+
+        # Try to extract away/home/time using your existing regex
         match = re.search(r'(.+?)\s*(?:@|vs\.?)\s*(.+?)\s+(\d{1,2}:\d{2}\s*(?:AM|PM)?)', game_str, re.I)
         if match:
             away, home, time_text = match.groups()
         else:
-            away, home = tds[0], tds[1]
-            time_text = tds[-1] if re.search(r'\d{1,2}:\d{2}', tds[-1]) else None
+            # fallback to first two columns as teams and last column as time if present
+            away, home = tds_text[0], tds_text[1]
+            time_text = tds_text[-1] if re.search(r'\d{1,2}:\d{2}', tds_text[-1]) else None
+
         rows_data.append({
             "away": away.strip(),
             "home": home.strip(),
             "game_time": time_text.strip() if time_text else None,
             "home_abbr": TEAM_ABBR_MAP.get(home.strip(), home.strip()),
-            "away_abbr": TEAM_ABBR_MAP.get(away.strip(), away.strip())
+            "away_abbr": TEAM_ABBR_MAP.get(away.strip(), away.strip()),
+            "date": current_date  # may be None if header wasn't found; we'll handle that after
         })
-    return pd.DataFrame(rows_data)
+
+    df = pd.DataFrame(rows_data)
+    # If date is missing for rows, try to infer: if all rows have same non-null date, fill; otherwise leave None
+    if "date" in df.columns and df["date"].isna().any():
+        if df["date"].notna().any():
+            known_dates = df["date"].dropna().unique()
+            if len(known_dates) == 1:
+                df["date"] = df["date"].fillna(known_dates[0])
+    return df
 
 # --- Streamlit App ---
 st.set_page_config(page_title="NHL High-Danger Lines", layout="wide")
@@ -103,32 +159,19 @@ else:
 # Fetch schedule
 schedule_df = fetch_schedule()
 
-# ✅ NEW: filter to today's games only
+# ✅ NEW: ensure we only keep games that are tagged for today's date
 if not schedule_df.empty:
     today = dt.datetime.now().date()
-
-    def parse_game_datetime(t):
-        try:
-            return dt.datetime.strptime(t, "%I:%M %p").replace(
-                year=today.year, month=today.month, day=today.day
-            )
-        except Exception:
-            return None
-
-    schedule_df["parsed_time"] = schedule_df["game_time"].apply(parse_game_datetime)
-    schedule_df = schedule_df.dropna(subset=["parsed_time"])
-
-    start = dt.datetime.combine(today, dt.time(0, 0))
-    end = start + dt.timedelta(days=1)
-    schedule_df = schedule_df[
-        (schedule_df["parsed_time"] >= start) & (schedule_df["parsed_time"] < end)
-    ]
+    if 'date' in schedule_df.columns:
+        # drop rows without a recognized date first (they likely aren't games)
+        schedule_df = schedule_df.dropna(subset=['date'])
+        schedule_df = schedule_df[schedule_df['date'] == today]
 
 if schedule_df.empty:
     st.warning("No games today.")
 else:
     st.header("Today's Schedule")
-    st.dataframe(schedule_df.drop(columns=["parsed_time"]))
+    st.dataframe(schedule_df)
 
     # -------------------------
     # Raw Data (expander with tabs)
