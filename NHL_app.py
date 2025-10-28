@@ -231,20 +231,18 @@ if not schedule_df.empty:
         home_stats = per_game_from_team_row(home_row)
         away_stats = per_game_from_team_row(away_row)
 
-        # Goalies (UPDATED: exact 3-letter team match, only 'all' situation, dropdown tied to CSV rows)
+        # Fixed goalies_for_team
         def goalies_for_team(team_abbr):
             """Return filtered goalie DataFrame for a team (exact 3-letter match, only situation == 'all')."""
             if goalies.empty:
                 return pd.DataFrame()
-            g = goalies[
-                (goalies['team'].astype(str).str.upper() == str(team_abbr).upper()) &
-                (goalies['situation'].astype(str).str.lower() == 'all')
-            ].copy()
-            # Build display column directly tied to each row
-            g['display'] = g.apply(lambda r: f"{r['name']} ({int(r.get('games_played', 0))} gp)", axis=1)
+            mask_team = goalies['team'].astype(str).str.upper() == str(team_abbr).upper()
+            mask_sit = goalies['situation'].astype(str).str.lower() == 'all'
+            g = goalies[mask_team & mask_sit].copy()
+            if g.empty: return pd.DataFrame()
+            g.insert(0, 'display', g.apply(lambda r: f"{r['name']} ({int(r.get('games_played',0))} gp)", axis=1))
             return g
 
-        # Build per-team goalie DataFrames and choice lists
         home_goalies_df = goalies_for_team(home_team)
         away_goalies_df = goalies_for_team(away_team)
 
@@ -258,7 +256,6 @@ if not schedule_df.empty:
             sel_away_goalie = st.selectbox(f"Select Away Goalie ({away_team})", away_goalie_choices, index=0)
 
         def goalie_row_from_display(display_str, df):
-            """Match dropdown text back to the correct goalie row from the provided DataFrame."""
             if display_str == "Season aggregate":
                 return None
             name_part = re.sub(r'\s*\(\d+\s*gp\)\s*$', '', display_str).strip()
