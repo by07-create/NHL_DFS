@@ -62,14 +62,11 @@ def per_game_from_team_row(team_row):
       1) scoreVenueAdjustedxGoalsFor / Against
       2) highDangerxGoalsFor / Against
       3) xGoalsFor / xGoalsAgainst
-    Returns dict with xg_for_pg and xg_against_pg (and sog if available)
     """
     if team_row is None or team_row.empty: return None
     gp = team_row.get('games_played', None)
     if not pd.notna(gp) or gp == 0: return None
     g = {}
-
-    # prefer scoreVenueAdjusted if present
     if 'scoreVenueAdjustedxGoalsFor' in team_row and 'scoreVenueAdjustedxGoalsAgainst' in team_row and pd.notna(team_row.get('scoreVenueAdjustedxGoalsFor', None)):
         g['xg_for_pg'] = safe_div(team_row['scoreVenueAdjustedxGoalsFor'], gp)
         g['xg_against_pg'] = safe_div(team_row['scoreVenueAdjustedxGoalsAgainst'], gp)
@@ -81,87 +78,67 @@ def per_game_from_team_row(team_row):
         g['xg_against_pg'] = safe_div(team_row['xGoalsAgainst'], gp)
     else:
         return None
-
     if 'shotsOnGoalFor' in team_row: g['sog_for_pg'] = safe_div(team_row['shotsOnGoalFor'], gp)
     if 'shotsOnGoalAgainst' in team_row: g['sog_against_pg'] = safe_div(team_row['shotsOnGoalAgainst'], gp)
     return g
 
 def goalie_effect_from_row(row):
     """
-    Raw goalie effect as proportion:
-      prefer high-danger fields:
-         raw = 1 - (highDangerGoals / highDangerxGoals)
-      else fallback:
-         raw = 1 - (goals / xGoals)
-    Positive -> goalie allowed fewer goals than expected (good); negative -> worse than expected.
+    Raw goalie effect (proportion):
+      prefer high-danger: 1 - (highDangerGoals / highDangerxGoals)
+      else fallback:      1 - (goals / xGoals)
+    Positive => better than expected (reduces opponent scoring).
     """
     if row is None or len(row) == 0: return 0.0
-    # prefer high danger
     hd_xg = row.get('highDangerxGoals', None)
-    hd_g = row.get('highDangerGoals', None)
+    hd_g  = row.get('highDangerGoals', None)
     if pd.notna(hd_xg) and hd_xg > 0 and pd.notna(hd_g):
         return float(1.0 - (hd_g / hd_xg))
     xg = row.get('xGoals', None)
-    g = row.get('goals', None)
+    g  = row.get('goals', None)
     if pd.notna(xg) and xg > 0 and pd.notna(g):
         return float(1.0 - (g / xg))
     return 0.0
 
 def adjusted_goalie_effect(row, max_reduction=MAX_GOALIE_REDUCTION, goalies_ref=None):
     """
-    Shrunk goalie effect using empirical Bayes shrinkage toward league prior.
-    Returns clipped shrunk effect in same units as goalie_effect_from_row.
+    Empirical-Bayes shrinkage of goalie effect toward league prior (weighted by GP), then clipped.
     """
-    if row is None or len(row) == 0:
-        return 0.0
-
+    if row is None or len(row) == 0: return 0.0
     raw = goalie_effect_from_row(row)
     gp = int(row.get('games_played', 0)) if pd.notna(row.get('games_played', None)) else 0
     k = GOALIE_SHRINK_K
 
-    # league prior (weighted by gp)
     prior = 0.0
     if goalies_ref is not None and not goalies_ref.empty:
-        vals = []
         total_gp = 0
+        acc = 0.0
         for _, r in goalies_ref.iterrows():
             gp_r = int(r.get('games_played', 0)) if pd.notna(r.get('games_played', None)) else 0
-            eff = goalie_effect_from_row(r)
-            vals.append((eff, gp_r))
+            acc += goalie_effect_from_row(r) * gp_r
             total_gp += gp_r
         if total_gp > 0:
-            prior = sum(e * g for e, g in vals) / total_gp
+            prior = acc / total_gp
 
     w = gp / (gp + k) if (gp + k) > 0 else 0.0
     shrunk = w * raw + (1.0 - w) * prior
-    shrunk = max(min(shrunk, max_reduction), -max_reduction)
-    return float(shrunk)
+    return float(max(min(shrunk, max_reduction), -max_reduction))
 
 def aggregate_goalie_effect(goalies_df, team_abbr):
     """
-    Average the adjusted goalie effects for a team (for the 'Season aggregate' fallback).
-    Expects goalies_df to be filtered to situation == 'all' for proper averaging.
+    Team aggregate goalie effect (average of adjusted effects across team goalies).
     """
-    if goalies_df is None or goalies_df.empty:
-        return 0.0
+    if goalies_df is None or goalies_df.empty: return 0.0
     g = goalies_df[goalies_df['team'].astype(str).str.upper() == str(team_abbr).upper()]
     if g.empty:
         g = goalies_df[goalies_df['team'].astype(str).str.upper().str.contains(str(team_abbr).upper(), na=False)]
-    if g.empty:
-        return 0.0
-
-    effects = []
-    for _, r in g.iterrows():
-        effects.append(adjusted_goalie_effect(r, max_reduction=MAX_GOALIE_REDUCTION, goalies_ref=goalies_df))
+    if g.empty: return 0.0
+    effects = [adjusted_goalie_effect(r, max_reduction=MAX_GOALIE_REDUCTION, goalies_ref=goalies_df) for _, r in g.iterrows()]
     return float(sum(effects) / len(effects)) if effects else 0.0
 
 def get_goalie_selection_effect(display_idx, team_abbr, per_team_df, goalies_all_df):
     """
-    Given the selected index (or -1 for aggregate), return the shrunk effect.
-    - display_idx: selected index from selectbox (DataFrame index or -1)
-    - team_abbr: 3-letter team code
-    - per_team_df: the filtered per-team goalie df (situation == 'all')
-    - goalies_all_df: all goalies filtered to 'all' (for league prior)
+    display_idx == -1 => season aggregate. Else, use selected row (index-bound).
     """
     if display_idx == -1 or per_team_df is None or per_team_df.empty:
         return aggregate_goalie_effect(goalies_all_df, team_abbr)
@@ -205,7 +182,7 @@ def fetch_schedule():
     rows_data = []
     for tr in table.find_all("tr"):
         tds = [td.get_text(strip=True) for td in tr.find_all("td")]
-        if len(tds)<2: continue
+        if len(tds) < 2: continue
         game_str = " ".join(tds)
         match = re.search(r'(.+?)\s*(?:@|vs\.?)\s*(.+?)\s+(\d{1,2}:\d{2}\s*(?:AM|PM)?)', game_str, re.I)
         if match:
@@ -223,27 +200,17 @@ def fetch_schedule():
 
 def expected_goals(team_stats, opp_stats, home=False, goalie_adj=0.0):
     """
-    team_stats and opp_stats are per-game dicts from per_game_from_team_row()
-    goalie_adj is the shrunk effect for the opposing goalie (proportion-like)
-    Returns lambda per game.
+    Per-game λ from team offense + opponent defense, with home bonus and opposing-goalie adjustment.
     """
     if team_stats is None or opp_stats is None:
         return None
-
     base_team = team_stats.get('xg_for_pg', 0.0)
     base_opp_allowed = opp_stats.get('xg_against_pg', 0.0)
-
     lam = (base_team + base_opp_allowed) / 2.0
-
     if home:
         lam *= HOME_ADV
-
-    # positive goalie_adj = good goalie => reduce opponent scoring
-    lam *= (1.0 - goalie_adj)
-
-    # clamp
-    lam = max(MIN_LAMBDA, min(lam, 12.0))
-    return lam
+    lam *= (1.0 - goalie_adj)  # positive goalie_adj reduces opponent scoring
+    return max(MIN_LAMBDA, min(lam, 12.0))
 
 # ---------- Streamlit App ----------
 st.set_page_config(page_title="NHL High-Danger Lines + Matchup Predictions", layout="wide")
@@ -254,13 +221,13 @@ lines = load_csv(urls['Lines'])
 goalies = load_csv(urls['Goalies'])
 teams = load_csv(urls['Teams'])
 
-# Filter 'all' situation for team/goalie reference data
+# Filter 'all' situation
 teams_all = teams[teams.get('situation','all').str.lower()=='all'] if not teams.empty else pd.DataFrame()
 goalies_all = goalies[goalies.get('situation','all').str.lower()=='all'] if not goalies.empty else pd.DataFrame()
 
 # If lines loaded, create team_abbr
 if not lines.empty:
-    lines['team_abbr'] = lines.iloc[:, 3].astype(str).str.upper() if lines.shape[1]>=4 else ""
+    lines['team_abbr'] = lines.iloc[:, 3].astype(str).str.upper() if lines.shape[1] >= 4 else ""
 
 # Schedule
 schedule_df = fetch_schedule()
@@ -323,26 +290,20 @@ if not schedule_df.empty:
 
         # --- Goalie Selection (index-bound, no string matching) ---
         def goalies_for_team(team_abbr):
-            """Return filtered goalie DataFrame for a team (exact 3-letter match, only situation == 'all')."""
-            if goalies.empty:
-                return pd.DataFrame()
+            if goalies.empty: return pd.DataFrame()
             mask_team = goalies['team'].astype(str).str.upper() == str(team_abbr).upper()
-            mask_sit = goalies['situation'].astype(str).str.lower() == 'all'
-            g = goalies[mask_team & mask_sit].copy()
-            return g
+            mask_sit  = goalies['situation'].astype(str).str.lower() == 'all'
+            return goalies[mask_team & mask_sit].copy()
 
         home_goalies_df = goalies_for_team(home_team)
         away_goalies_df = goalies_for_team(away_team)
 
         def goalie_label(df, idx):
-            if idx == -1:
-                return "Season aggregate"
+            if idx == -1: return "Season aggregate"
             r = df.loc[idx]
             gp = r.get('games_played', 0)
-            try:
-                gp = int(gp) if pd.notna(gp) else 0
-            except Exception:
-                gp = 0
+            try: gp = int(gp) if pd.notna(gp) else 0
+            except Exception: gp = 0
             return f"{r.get('name','')} ({gp} gp)"
 
         home_options = [-1] + (home_goalies_df.index.tolist() if not home_goalies_df.empty else [])
@@ -364,25 +325,19 @@ if not schedule_df.empty:
                 format_func=lambda x: goalie_label(away_goalies_df, x) if x != -1 else "Season aggregate"
             )
 
-        # Effects from selections
+        # Effects from selections (home goalie affects AWAY λ; away goalie affects HOME λ)
         home_goalie_effect = get_goalie_selection_effect(sel_home_idx, home_team, home_goalies_df, goalies_all)
         away_goalie_effect = get_goalie_selection_effect(sel_away_idx, away_team, away_goalies_df, goalies_all)
 
-        # Optional: Goalie impact analysis
+        # Toggle to see exact numbers
         show_goalie_debug = st.checkbox("Show Goalie Impact Analysis", value=False)
         if show_goalie_debug:
             st.write("### Goalie impact breakdown")
-            if sel_home_idx == -1:
-                st.write(f"Home goalie: Season aggregate (team {home_team}) → effect = **{home_goalie_effect:+.4f}**")
-            else:
-                st.write(f"Home goalie: {goalie_label(home_goalies_df, sel_home_idx)} → effect = **{home_goalie_effect:+.4f}**")
-            if sel_away_idx == -1:
-                st.write(f"Away goalie: Season aggregate (team {away_team}) → effect = **{away_goalie_effect:+.4f}**")
-            else:
-                st.write(f"Away goalie: {goalie_label(away_goalies_df, sel_away_idx)} → effect = **{away_goalie_effect:+.4f}**")
+            st.write(f"Home goalie effect (affects AWAY λ): **{home_goalie_effect:+.4f}**")
+            st.write(f"Away goalie effect (affects HOME λ): **{away_goalie_effect:+.4f}**")
 
-        # Compute lambdas (apply opposing goalie effect)
-        lam_home = expected_goals(home_stats, away_stats, home=True, goalie_adj=away_goalie_effect)
+        # Compute lambdas
+        lam_home = expected_goals(home_stats, away_stats, home=True,  goalie_adj=away_goalie_effect)
         lam_away = expected_goals(away_stats, home_stats, home=False, goalie_adj=home_goalie_effect)
 
         if lam_home is None or lam_away is None:
