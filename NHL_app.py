@@ -30,8 +30,8 @@ TEAM_ABBR_MAP = {
     "New York Islanders": "NYI","New York Rangers": "NYR","Ottawa Senators": "OTT",
     "Philadelphia Flyers": "PHI","Pittsburgh Penguins": "PIT","San Jose Sharks": "SJS",
     "Seattle Kraken": "SEA","St. Louis Blues": "STL","Tampa Bay Lightning": "TBL",
-    "Toronto Maple Leafs": "TOR","Vancouver Canucks": "VAN","Utah Mammoth": "UTA","Vegas Golden Knights": "VGK",
-    "Washington Capitals": "WSH","Winnipeg Jets": "WPG"
+    "Toronto Maple Leafs": "TOR","Vancouver Canucks": "VAN","Utah Mammoth": "UTA",
+    "Vegas Golden Knights": "VGK","Washington Capitals": "WSH","Winnipeg Jets": "WPG"
 }
 
 # Data URLs
@@ -53,13 +53,17 @@ def load_csv(url):
         return pd.DataFrame()
 
 def safe_div(a, b):
-    try: return a / b
-    except Exception: return None
+    try:
+        return a / b
+    except Exception:
+        return None
 
 def per_game_from_team_row(team_row):
-    if team_row is None or team_row.empty: return None
+    if team_row is None or team_row.empty:
+        return None
     gp = team_row.get('games_played', None)
-    if not pd.notna(gp) or gp == 0: return None
+    if not pd.notna(gp) or gp == 0:
+        return None
     g = {}
     if 'scoreVenueAdjustedxGoalsFor' in team_row and 'scoreVenueAdjustedxGoalsAgainst' in team_row and pd.notna(team_row.get('scoreVenueAdjustedxGoalsFor', None)):
         g['xg_for_pg'] = safe_div(team_row['scoreVenueAdjustedxGoalsFor'], gp)
@@ -72,14 +76,16 @@ def per_game_from_team_row(team_row):
         g['xg_against_pg'] = safe_div(team_row['xGoalsAgainst'], gp)
     else:
         return None
-    if 'shotsOnGoalFor' in team_row: g['sog_for_pg'] = safe_div(team_row['shotsOnGoalFor'], gp)
-    if 'shotsOnGoalAgainst' in team_row: g['sog_against_pg'] = safe_div(team_row['shotsOnGoalAgainst'], gp)
+    if 'shotsOnGoalFor' in team_row:
+        g['sog_for_pg'] = safe_div(team_row['shotsOnGoalFor'], gp)
+    if 'shotsOnGoalAgainst' in team_row:
+        g['sog_against_pg'] = safe_div(team_row['shotsOnGoalAgainst'], gp)
     return g
 
-# ---------- Goalie modeling ----------
+# ---------- Goalie Modeling ----------
 def _ratio(row, goals_col, xg_col, min_xg_required):
     xg = row.get(xg_col, None)
-    g  = row.get(goals_col, None)
+    g = row.get(goals_col, None)
     if pd.notna(xg) and pd.notna(g) and xg > 0:
         if float(xg) >= float(min_xg_required):
             return 1.0 - float(g) / float(xg)
@@ -174,28 +180,31 @@ def get_goalie_selection_effect(display_idx, team_abbr, per_team_df, goalies_all
     info['mode'] = 'SINGLE'
     return eff, info
 
-# ---------- Match math ----------
+# ---------- Game math ----------
 def poisson_pmf(k, lam):
     lam = max(0.001, float(lam))
-    return (lam**k) * math.exp(-lam) / math.factorial(k)
+    return (lam ** k) * math.exp(-lam) / math.factorial(k)
 
 def win_probs_regulation(lam_home, lam_away, max_goals=12):
-    pmf_h = [poisson_pmf(k, lam_home) for k in range(max_goals+1)]
-    pmf_a = [poisson_pmf(k, lam_away) for k in range(max_goals+1)]
+    pmf_h = [poisson_pmf(k, lam_home) for k in range(max_goals + 1)]
+    pmf_a = [poisson_pmf(k, lam_away) for k in range(max_goals + 1)]
     p_home = p_away = p_tie = 0.0
-    for i in range(max_goals+1):
-        for j in range(max_goals+1):
+    for i in range(max_goals + 1):
+        for j in range(max_goals + 1):
             p = pmf_h[i] * pmf_a[j]
-            if i > j: p_home += p
-            elif j > i: p_away += p
-            else: p_tie += p
+            if i > j:
+                p_home += p
+            elif j > i:
+                p_away += p
+            else:
+                p_tie += p
     total = p_home + p_away + p_tie
-    return {'home_reg': p_home/total, 'away_reg': p_away/total, 'tie_reg': p_tie/total} if total>0 else {'home_reg':0.0,'away_reg':0.0,'tie_reg':0.0}
+    return {'home_reg': p_home / total, 'away_reg': p_away / total, 'tie_reg': p_tie / total} if total > 0 else {'home_reg': 0.0, 'away_reg': 0.0, 'tie_reg': 0.0}
 
 def win_probs_with_ot(lam_home, lam_away, ot_home_win_prob=0.5, max_goals=12):
     regs = win_probs_regulation(lam_home, lam_away, max_goals=max_goals)
-    home_overall = regs['home_reg'] + regs['tie_reg']*ot_home_win_prob
-    away_overall = regs['away_reg'] + regs['tie_reg']*(1.0 - ot_home_win_prob)
+    home_overall = regs['home_reg'] + regs['tie_reg'] * ot_home_win_prob
+    away_overall = regs['away_reg'] + regs['tie_reg'] * (1.0 - ot_home_win_prob)
     return {**regs, 'home_overall': home_overall, 'away_overall': away_overall}
 
 def fetch_schedule():
@@ -208,11 +217,13 @@ def fetch_schedule():
         return pd.DataFrame()
     soup = BeautifulSoup(r.text, "lxml")
     table = soup.find("table")
-    if not table: return pd.DataFrame()
+    if not table:
+        return pd.DataFrame()
     rows_data = []
     for tr in table.find_all("tr"):
         tds = [td.get_text(strip=True) for td in tr.find_all("td")]
-        if len(tds)<2: continue
+        if len(tds) < 2:
+            continue
         game_str = " ".join(tds)
         match = re.search(r'(.+?)\s*(?:@|vs\.?)\s*(.+?)\s+(\d{1,2}:\d{2}\s*(?:AM|PM)?)', game_str, re.I)
         if match:
@@ -237,47 +248,39 @@ def expected_goals(team_stats, opp_stats, home=False, goalie_adj=0.0):
     if home:
         lam *= HOME_ADV
     lam *= (1.0 - goalie_adj)
-    lam = max(MIN_LAMBDA, min(lam, 12.0))
-    return lam
+    return max(MIN_LAMBDA, min(lam, 12.0))
 
-# ---------- Streamlit App ----------
-st.set_page_config(page_title="NHL High-Danger Lines + Matchup Predictions", layout="wide")
+# ---------- Streamlit ----------
+st.set_page_config(page_title="NHL High-Danger Lines + Predictions", layout="wide")
 st.title("NHL Schedule → High-Danger Lines + Matchup Predictions")
 
-# Load data
 lines = load_csv(urls['Lines'])
 goalies = load_csv(urls['Goalies'])
 teams = load_csv(urls['Teams'])
 
-# Filter 'all' situation for team/goalie reference data
-teams_all = teams[teams.get('situation','all').str.lower()=='all'] if not teams.empty else pd.DataFrame()
-goalies_all = goalies[goalies.get('situation','all').str.lower()=='all'] if not goalies.empty else pd.DataFrame()
+teams_all = teams[teams.get('situation', 'all').str.lower() == 'all'] if not teams.empty else pd.DataFrame()
+goalies_all = goalies[goalies.get('situation', 'all').str.lower() == 'all'] if not goalies.empty else pd.DataFrame()
 
-# If lines loaded, create team_abbr
-if not lines.empty:
-    lines['team_abbr'] = lines.iloc[:, 3].astype(str).str.upper() if lines.shape[1]>=4 else ""
-
-# Schedule
 schedule_df = fetch_schedule()
 if not schedule_df.empty:
     st.header("Today's Schedule")
     st.dataframe(schedule_df)
 
-    # Matchups
     matchups = [f"{row['away_abbr']} @ {row['home_abbr']} ({row['game_time']})" for _, row in schedule_df.iterrows()]
     selected_matchup = st.selectbox("Select a Matchup", matchups)
 
     m = re.match(r'(\w+)\s*@\s*(\w+)', selected_matchup)
     if m:
         away_team, home_team = m.groups()
-        st.subheader(f"Prediction: {home_team} vs {away_team}")
 
         def get_team_row_by_abbr(abbr):
-            if teams_all.empty: return pd.Series()
-            for col in ['name','team','abbr']:
+            if teams_all.empty:
+                return pd.Series()
+            for col in ['name', 'team', 'abbr']:
                 if col in teams_all.columns:
                     mask = teams_all[col].astype(str).str.upper().str.contains(str(abbr).upper(), na=False)
-                    if mask.any(): return teams_all[mask].iloc[0]
+                    if mask.any():
+                        return teams_all[mask].iloc[0]
             return pd.Series()
 
         home_row = get_team_row_by_abbr(home_team)
@@ -285,7 +288,6 @@ if not schedule_df.empty:
         home_stats = per_game_from_team_row(home_row)
         away_stats = per_game_from_team_row(away_row)
 
-        # Goalie Selection
         def goalies_for_team(team_abbr):
             if goalies.empty:
                 return pd.DataFrame()
@@ -297,30 +299,42 @@ if not schedule_df.empty:
         away_goalies_df = goalies_for_team(away_team)
 
         def goalie_label(df, idx):
-            if idx == -1: return "Season aggregate"
-            r = df.loc[idx]; gp = int(r.get('games_played', 0)) if pd.notna(r.get('games_played', 0)) else 0
-            return f"{r.get('name','')} ({gp} gp)"
+            if idx == -1:
+                return "Season aggregate"
+            r = df.loc[idx]
+            gp = int(r.get('games_played', 0)) if pd.notna(r.get('games_played', 0)) else 0
+            return f"{r.get('name', '')} ({gp} gp)"
 
         home_options = [-1] + (home_goalies_df.index.tolist() if not home_goalies_df.empty else [])
         away_options = [-1] + (away_goalies_df.index.tolist() if not away_goalies_df.empty else [])
 
-        colg1, colg2 = st.columns(2)
-        with colg1:
-            sel_home_idx = st.selectbox(f"Select Home Goalie ({home_team})", options=home_options, index=0, format_func=lambda x: goalie_label(home_goalies_df, x) if x != -1 else "Season aggregate")
-        with colg2:
-            sel_away_idx = st.selectbox(f"Select Away Goalie ({away_team})", options=away_options, index=0, format_func=lambda x: goalie_label(away_goalies_df, x) if x != -1 else "Season aggregate")
+        col1, col2 = st.columns(2)
+        with col1:
+            sel_home_idx = st.selectbox(
+                f"Select Home Goalie ({home_team})",
+                options=home_options,
+                index=0,
+                format_func=lambda x: goalie_label(home_goalies_df, x) if x != -1 else "Season aggregate"
+            )
+        with col2:
+            sel_away_idx = st.selectbox(
+                f"Select Away Goalie ({away_team})",
+                options=away_options,
+                index=0,
+                format_func=lambda x: goalie_label(away_goalies_df, x) if x != -1 else "Season aggregate"
+            )
 
         home_goalie_effect, home_dbg = get_goalie_selection_effect(sel_home_idx, home_team, home_goalies_df, goalies_all)
         away_goalie_effect, away_dbg = get_goalie_selection_effect(sel_away_idx, away_team, away_goalies_df, goalies_all)
 
         lam_home = expected_goals(home_stats, away_stats, home=True, goalie_adj=away_goalie_effect)
-        lam_away = expected_goals(away_stats, home_stats, home...=False, goalie_adj=home_goalie_effect)
+        lam_away = expected_goals(away_stats, home_stats, home=False, goalie_adj=home_goalie_effect)
 
         if lam_home is None or lam_away is None:
             st.warning("Insufficient data to produce predictions for this matchup.")
         else:
             probs = win_probs_with_ot(lam_home, lam_away)
-            exp_total = lam_home + lam_away
+            exp_total =... lam_home + lam_away  
 
             st.markdown("### Model Output")
             c1, c2, c3 = st.columns(3)
