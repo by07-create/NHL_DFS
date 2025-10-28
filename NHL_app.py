@@ -243,3 +243,109 @@ def expected_goals(team_stats, opp_stats, home=False, goalie_adj=0.0):
 # ---------- Streamlit App ----------
 st.set_page_config(page_title="NHL High-Danger Lines + Matchup Predictions", layout="wide")
 st.title("NHL Schedule → High-Danger Lines + Matchup Predictions")
+
+# Load data
+lines = load_csv(urls['Lines'])
+goalies = load_csv(urls['Goalies'])
+teams = load_csv(urls['Teams'])
+
+# Filter 'all' situation for team/goalie reference data
+teams_all = teams[teams.get('situation','all').str.lower()=='all'] if not teams.empty else pd.DataFrame()
+goalies_all = goalies[goalies.get('situation','all').str.lower()=='all'] if not goalies.empty else pd.DataFrame()
+
+# If lines loaded, create team_abbr
+if not lines.empty:
+    lines['team_abbr'] = lines.iloc[:, 3].astype(str).str.upper() if lines.shape[1]>=4 else ""
+
+# Schedule
+schedule_df = fetch_schedule()
+if not schedule_df.empty:
+    st.header("Today's Schedule")
+    st.dataframe(schedule_df)
+
+    # Matchups
+    matchups = [f"{row['away_abbr']} @ {row['home_abbr']} ({row['game_time']})" for _, row in schedule_df.iterrows()]
+    selected_matchup = st.selectbox("Select a Matchup", matchups)
+
+    m = re.match(r'(\w+)\s*@\s*(\w+)', selected_matchup)
+    if m:
+        away_team, home_team = m.groups()
+        st.subheader(f"Prediction: {home_team} vs {away_team}")
+
+        def get_team_row_by_abbr(abbr):
+            if teams_all.empty: return pd.Series()
+            for col in ['name','team','abbr']:
+                if col in teams_all.columns:
+                    mask = teams_all[col].astype(str).str.upper().str.contains(str(abbr).upper(), na=False)
+                    if mask.any(): return teams_all[mask].iloc[0]
+            return pd.Series()
+
+        home_row = get_team_row_by_abbr(home_team)
+        away_row = get_team_row_by_abbr(away_team)
+        home_stats = per_game_from_team_row(home_row)
+        away_stats = per_game_from_team_row(away_row)
+
+        # Goalie Selection
+        def goalies_for_team(team_abbr):
+            if goalies.empty:
+                return pd.DataFrame()
+            mask_team = goalies['team'].astype(str).str.upper() == str(team_abbr).upper()
+            mask_sit = goalies['situation'].astype(str).str.lower() == 'all'
+            return goalies[mask_team & mask_sit].copy()
+
+        home_goalies_df = goalies_for_team(home_team)
+        away_goalies_df = goalies_for_team(away_team)
+
+        def goalie_label(df, idx):
+            if idx == -1: return "Season aggregate"
+            r = df.loc[idx]; gp = int(r.get('games_played', 0)) if pd.notna(r.get('games_played', 0)) else 0
+            return f"{r.get('name','')} ({gp} gp)"
+
+        home_options = [-1] + (home_goalies_df.index.tolist() if not home_goalies_df.empty else [])
+        away_options = [-1] + (away_goalies_df.index.tolist() if not away_goalies_df.empty else [])
+
+        colg1, colg2 = st.columns(2)
+        with colg1:
+            sel_home_idx = st.selectbox(f"Select Home Goalie ({home_team})", options=home_options, index=0, format_func=lambda x: goalie_label(home_goalies_df, x) if x != -1 else "Season aggregate")
+        with colg2:
+            sel_away_idx = st.selectbox(f"Select Away Goalie ({away_team})", options=away_options, index=0, format_func=lambda x: goalie_label(away_goalies_df, x) if x != -1 else "Season aggregate")
+
+        home_goalie_effect, home_dbg = get_goalie_selection_effect(sel_home_idx, home_team, home_goalies_df, goalies_all)
+        away_goalie_effect, away_dbg = get_goalie_selection_effect(sel_away_idx, away_team, away_goalies_df, goalies_all)
+
+        lam_home = expected_goals(home_stats, away_stats, home=True, goalie_adj=away_goalie_effect)
+        lam_away = expected_goals(away_stats, home_stats, home...=False, goalie_adj=home_goalie_effect)
+
+        if lam_home is None or lam_away is None:
+            st.warning("Insufficient data to produce predictions for this matchup.")
+        else:
+            probs = win_probs_with_ot(lam_home, lam_away)
+            exp_total = lam_home + lam_away
+
+            st.markdown("### Model Output")
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Home Expected Goals (λ)", f"{lam_home:.2f}")
+            c2.metric("Away Expected Goals (λ)", f"{lam_away:.2f}")
+            c3.metric("Total Expected Goals", f"{exp_total:.2f}")
+
+            st.caption(
+                f"Goalie effects — Home: {home_goalie_effect:+.3f} (affects AWAY λ), "
+                f"Away: {away_goalie_effect:+.3f} (affects HOME λ)"
+            )
+
+            st.markdown("### Win Probabilities (Regulation + OT/SO)")
+            st.write(
+                f"Regulation — Home: **{probs['home_reg']*100:.1f}%**, "
+                f"Away: **{probs['away_reg']*100:.1f}%**, "
+                f"Tie: **{probs['tie_reg']*100:.1f}%**"
+            )
+            st.write(
+                f"Overall — Home: **{probs['home_overall']*100:.1f}%**, "
+                f"Away: **{probs['away_overall']*100:.1f}%**"
+            )
+
+            with st.expander("Goalie Impact Debug"):
+                st.write("**Home goalie debug (affects AWAY λ):**")
+                st.json(home_dbg)
+                st.write("**Away goalie debug (affects HOME λ):**")
+                st.json(away_dbg)
