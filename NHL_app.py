@@ -231,33 +231,42 @@ if not schedule_df.empty:
         home_stats = per_game_from_team_row(home_row)
         away_stats = per_game_from_team_row(away_row)
 
-        # Goalies
+        # Goalies (UPDATED: exact 3-letter team match, only 'all' situation, dropdown tied to CSV rows)
         def goalies_for_team(team_abbr):
-            if goalies.empty: return []
-            g = goalies[goalies['team'].astype(str).str.upper().str.contains(str(team_abbr).upper(), na=False)]
-            out=[]
-            for _, r in g.iterrows():
-                name = r.get('name') or r.get('player') or ""
-                gp = int(r.get('games_played',0)) if pd.notna(r.get('games_played',None)) else 0
-                out.append(f"{name} ({gp} gp)")
-            return out
+            """Return filtered goalie DataFrame for a team (exact 3-letter match, only situation == 'all')."""
+            if goalies.empty:
+                return pd.DataFrame()
+            g = goalies[
+                (goalies['team'].astype(str).str.upper() == str(team_abbr).upper()) &
+                (goalies['situation'].astype(str).str.lower() == 'all')
+            ].copy()
+            # Build display column directly tied to each row
+            g['display'] = g.apply(lambda r: f"{r['name']} ({int(r.get('games_played', 0))} gp)", axis=1)
+            return g
 
-        home_goalie_choices = ["Season aggregate"] + goalies_for_team(home_team)
-        away_goalie_choices = ["Season aggregate"] + goalies_for_team(away_team)
+        # Build per-team goalie DataFrames and choice lists
+        home_goalies_df = goalies_for_team(home_team)
+        away_goalies_df = goalies_for_team(away_team)
+
+        home_goalie_choices = ["Season aggregate"] + home_goalies_df['display'].tolist()
+        away_goalie_choices = ["Season aggregate"] + away_goalies_df['display'].tolist()
+
         colg1,colg2 = st.columns(2)
-        with colg1: sel_home_goalie = st.selectbox(f"Select Home Goalie ({home_team})", home_goalie_choices, index=0)
-        with colg2: sel_away_goalie = st.selectbox(f"Select Away Goalie ({away_team})", away_goalie_choices, index=0)
+        with colg1:
+            sel_home_goalie = st.selectbox(f"Select Home Goalie ({home_team})", home_goalie_choices, index=0)
+        with colg2:
+            sel_away_goalie = st.selectbox(f"Select Away Goalie ({away_team})", away_goalie_choices, index=0)
 
-        def goalie_row_from_display(display_str, team_abbr):
-            if display_str=="Season aggregate": return None
-            name_part = re.sub(r'\s*\(\d+\s*gp\)\s*$', '', display_str).strip().lower()
-            candidates = goalies[goalies['team'].astype(str).str.upper().str.contains(str(team_abbr).upper(), na=False)].copy()
-            candidates['name_str'] = candidates.apply(lambda r: str(r.get('name') or r.get('player') or "").lower().strip(), axis=1)
-            candidates = candidates[candidates['name_str'] == name_part]
-            return candidates.iloc[0] if not candidates.empty else None
+        def goalie_row_from_display(display_str, df):
+            """Match dropdown text back to the correct goalie row from the provided DataFrame."""
+            if display_str == "Season aggregate":
+                return None
+            name_part = re.sub(r'\s*\(\d+\s*gp\)\s*$', '', display_str).strip()
+            row = df[df['name'] == name_part]
+            return row.iloc[0] if not row.empty else None
 
-        home_goalie_row = goalie_row_from_display(sel_home_goalie, home_team)
-        away_goalie_row = goalie_row_from_display(sel_away_goalie, away_team)
+        home_goalie_row = goalie_row_from_display(sel_home_goalie, home_goalies_df)
+        away_goalie_row = goalie_row_from_display(sel_away_goalie, away_goalies_df)
 
         home_goalie_effect = adjusted_goalie_effect(home_goalie_row) if home_goalie_row is not None else aggregate_goalie_effect(goalies_all, home_team)
         away_goalie_effect = adjusted_goalie_effect(away_goalie_row) if away_goalie_row is not None else aggregate_goalie_effect(goalies_all, away_team)
