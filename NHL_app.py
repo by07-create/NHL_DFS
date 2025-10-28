@@ -155,22 +155,18 @@ def aggregate_goalie_effect(goalies_df, team_abbr):
         effects.append(adjusted_goalie_effect(r, max_reduction=MAX_GOALIE_REDUCTION, goalies_ref=goalies_df))
     return float(sum(effects) / len(effects)) if effects else 0.0
 
-def get_goalie_selection_effect(display_str, goalies_all_df, team_abbr):
+def get_goalie_selection_effect(display_idx, team_abbr, per_team_df, goalies_all_df):
     """
-    Given the dropdown display string (e.g. "Name (12 gp)"), return the shrunk effect.
-    If display_str == "Season aggregate" or not found, use aggregate for team.
+    Given the selected index (or -1 for aggregate), return the shrunk effect.
+    - display_idx: selected index from selectbox (DataFrame index or -1)
+    - team_abbr: 3-letter team code
+    - per_team_df: the filtered per-team goalie df (situation == 'all')
+    - goalies_all_df: all goalies filtered to 'all' (for league prior)
     """
-    if display_str == "Season aggregate" or display_str is None:
+    if display_idx == -1 or per_team_df is None or per_team_df.empty:
         return aggregate_goalie_effect(goalies_all_df, team_abbr)
-    name_part = re.sub(r'\s*\(\d+\s*gp\)\s*$', '', display_str).strip()
-    # match case-insensitive
-    sel = goalies_all_df[goalies_all_df['name'].astype(str).str.lower() == name_part.lower()]
-    if sel.empty:
-        # fallback: try contains
-        sel = goalies_all_df[goalies_all_df['name'].astype(str).str.lower().str.contains(name_part.lower(), na=False)]
-    if sel.empty:
-        return aggregate_goalie_effect(goalies_all_df, team_abbr)
-    return adjusted_goalie_effect(sel.iloc[0], max_reduction=MAX_GOALIE_REDUCTION, goalies_ref=goalies_all_df)
+    row = per_team_df.loc[display_idx]
+    return adjusted_goalie_effect(row, max_reduction=MAX_GOALIE_REDUCTION, goalies_ref=goalies_all_df)
 
 def poisson_pmf(k, lam):
     lam = max(0.001, float(lam))
@@ -227,31 +223,26 @@ def fetch_schedule():
 
 def expected_goals(team_stats, opp_stats, home=False, goalie_adj=0.0):
     """
-    Updated expected goals calculation:
-      - team_stats and opp_stats are per-game dicts from per_game_from_team_row()
-      - goalie_adj is the shrunk effect for the opposing goalie (proportion-like)
+    team_stats and opp_stats are per-game dicts from per_game_from_team_row()
+    goalie_adj is the shrunk effect for the opposing goalie (proportion-like)
     Returns lambda per game.
     """
     if team_stats is None or opp_stats is None:
         return None
 
-    # base: average of team's offensive rate and opponent's defensive allowance (both per game)
     base_team = team_stats.get('xg_for_pg', 0.0)
     base_opp_allowed = opp_stats.get('xg_against_pg', 0.0)
 
     lam = (base_team + base_opp_allowed) / 2.0
 
-    # home advantage
     if home:
         lam *= HOME_ADV
 
-    # apply goalie adjustment (goalie_adj is in same units as adjusted_goalie_effect)
-    # interpretation: positive goalie_adj -> goalie performed better than expected => reduce opponent scoring
+    # positive goalie_adj = good goalie => reduce opponent scoring
     lam *= (1.0 - goalie_adj)
 
-    # clamp to keep poisson stable
-    lam = max(MIN_LAMBDA, lam)
-    lam = min(lam, 12.0)  # keep possibility for blowouts if data shows it
+    # clamp
+    lam = max(MIN_LAMBDA, min(lam, 12.0))
     return lam
 
 # ---------- Streamlit App ----------
@@ -266,18 +257,6 @@ teams = load_csv(urls['Teams'])
 # Filter 'all' situation for team/goalie reference data
 teams_all = teams[teams.get('situation','all').str.lower()=='all'] if not teams.empty else pd.DataFrame()
 goalies_all = goalies[goalies.get('situation','all').str.lower()=='all'] if not goalies.empty else pd.DataFrame()
-
-# Precompute league-level averages for team rates (used implicitly by per-game selections if needed)
-league_off_vals = []
-league_def_vals = []
-if not teams_all.empty:
-    for _, row in teams_all.iterrows():
-        pg = per_game_from_team_row(row)
-        if pg:
-            if pg.get('xg_for_pg') is not None: league_off_vals.append(pg['xg_for_pg'])
-            if pg.get('xg_against_pg') is not None: league_def_vals.append(pg['xg_against_pg'])
-league_off_avg = float(sum(league_off_vals)/len(league_off_vals)) if league_off_vals else 3.0
-league_def_avg = float(sum(league_def_vals)/len(league_def_vals)) if league_def_vals else 3.0
 
 # If lines loaded, create team_abbr
 if not lines.empty:
@@ -342,80 +321,67 @@ if not schedule_df.empty:
         home_stats = per_game_from_team_row(home_row)
         away_stats = per_game_from_team_row(away_row)
 
-        # --- Goalie Selection (filtered to 'All' situations) ---
+        # --- Goalie Selection (index-bound, no string matching) ---
         def goalies_for_team(team_abbr):
             """Return filtered goalie DataFrame for a team (exact 3-letter match, only situation == 'all')."""
             if goalies.empty:
-                return pd.DataFrame(columns=['display'])
+                return pd.DataFrame()
             mask_team = goalies['team'].astype(str).str.upper() == str(team_abbr).upper()
             mask_sit = goalies['situation'].astype(str).str.lower() == 'all'
             g = goalies[mask_team & mask_sit].copy()
-            if g.empty:
-                return pd.DataFrame(columns=['display'])
-            # safe assign display column
-            g = g.assign(display=g.apply(lambda r: f"{r['name']} ({int(r.get('games_played', 0))} gp)", axis=1))
             return g
 
         home_goalies_df = goalies_for_team(home_team)
         away_goalies_df = goalies_for_team(away_team)
 
-        home_goalie_choices = ["Season aggregate"] + home_goalies_df['display'].tolist()
-        away_goalie_choices = ["Season aggregate"] + away_goalies_df['display'].tolist()
+        def goalie_label(df, idx):
+            if idx == -1:
+                return "Season aggregate"
+            r = df.loc[idx]
+            gp = r.get('games_played', 0)
+            try:
+                gp = int(gp) if pd.notna(gp) else 0
+            except Exception:
+                gp = 0
+            return f"{r.get('name','')} ({gp} gp)"
 
-        colg1,colg2 = st.columns(2)
+        home_options = [-1] + (home_goalies_df.index.tolist() if not home_goalies_df.empty else [])
+        away_options = [-1] + (away_goalies_df.index.tolist() if not away_goalies_df.empty else [])
+
+        colg1, colg2 = st.columns(2)
         with colg1:
-            sel_home_goalie = st.selectbox(f"Select Home Goalie ({home_team})", home_goalie_choices, index=0)
+            sel_home_idx = st.selectbox(
+                f"Select Home Goalie ({home_team})",
+                options=home_options,
+                index=0,
+                format_func=lambda x: goalie_label(home_goalies_df, x) if x != -1 else "Season aggregate"
+            )
         with colg2:
-            sel_away_goalie = st.selectbox(f"Select Away Goalie ({away_team})", away_goalie_choices, index=0)
+            sel_away_idx = st.selectbox(
+                f"Select Away Goalie ({away_team})",
+                options=away_options,
+                index=0,
+                format_func=lambda x: goalie_label(away_goalies_df, x) if x != -1 else "Season aggregate"
+            )
 
-        # compute goalie effects from selections (using goalies_all as the reference prior)
-        home_goalie_effect = get_goalie_selection_effect(sel_home_goalie, goalies_all, home_team)
-        away_goalie_effect = get_goalie_selection_effect(sel_away_goalie, goalies_all, away_team)
+        # Effects from selections
+        home_goalie_effect = get_goalie_selection_effect(sel_home_idx, home_team, home_goalies_df, goalies_all)
+        away_goalie_effect = get_goalie_selection_effect(sel_away_idx, away_team, away_goalies_df, goalies_all)
 
-        # Debug / analysis checkbox
+        # Optional: Goalie impact analysis
         show_goalie_debug = st.checkbox("Show Goalie Impact Analysis", value=False)
         if show_goalie_debug:
             st.write("### Goalie impact breakdown")
-            st.write(f"Home goalie selection: **{sel_home_goalie}** → effect = **{home_goalie_effect:.4f}**")
-            st.write(f"Away goalie selection: **{sel_away_goalie}** → effect = **{away_goalie_effect:.4f}**")
-
-            # show per-row details when specific goalie chosen
-            def goalie_details_for_display(display_str, df):
-                if display_str == "Season aggregate":
-                    return None
-                name_part = re.sub(r'\s*\(\d+\s*gp\)\s*$', '', display_str).strip()
-                sel = df[df['name'].astype(str).str.lower() == name_part.lower()]
-                if sel.empty:
-                    sel = df[df['name'].astype(str).str.lower().str.contains(name_part.lower(), na=False)]
-                return sel.iloc[0] if not sel.empty else None
-
-            hrow = goalie_details_for_display(sel_home_goalie, goalies_all)
-            arow = goalie_details_for_display(sel_away_goalie, goalies_all)
-            if hrow is not None:
-                st.write("Home goalie raw stats (selected):", {
-                    'name': hrow.get('name'),
-                    'games_played': int(hrow.get('games_played',0)) if pd.notna(hrow.get('games_played',None)) else 0,
-                    'highDangerxGoals': hrow.get('highDangerxGoals'),
-                    'highDangerGoals': hrow.get('highDangerGoals'),
-                    'xGoals': hrow.get('xGoals'),
-                    'goals': hrow.get('goals')
-                })
+            if sel_home_idx == -1:
+                st.write(f"Home goalie: Season aggregate (team {home_team}) → effect = **{home_goalie_effect:+.4f}**")
             else:
-                st.write("Home goalie: using team aggregate.")
-
-            if arow is not None:
-                st.write("Away goalie raw stats (selected):", {
-                    'name': arow.get('name'),
-                    'games_played': int(arow.get('games_played',0)) if pd.notna(arow.get('games_played',None)) else 0,
-                    'highDangerxGoals': arow.get('highDangerxGoals'),
-                    'highDangerGoals': arow.get('highDangerGoals'),
-                    'xGoals': arow.get('xGoals'),
-                    'goals': arow.get('goals')
-                })
+                st.write(f"Home goalie: {goalie_label(home_goalies_df, sel_home_idx)} → effect = **{home_goalie_effect:+.4f}**")
+            if sel_away_idx == -1:
+                st.write(f"Away goalie: Season aggregate (team {away_team}) → effect = **{away_goalie_effect:+.4f}**")
             else:
-                st.write("Away goalie: using team aggregate.")
+                st.write(f"Away goalie: {goalie_label(away_goalies_df, sel_away_idx)} → effect = **{away_goalie_effect:+.4f}**")
 
-        # compute lambdas applying the opposing goalie effect
+        # Compute lambdas (apply opposing goalie effect)
         lam_home = expected_goals(home_stats, away_stats, home=True, goalie_adj=away_goalie_effect)
         lam_away = expected_goals(away_stats, home_stats, home=False, goalie_adj=home_goalie_effect)
 
@@ -431,6 +397,12 @@ if not schedule_df.empty:
             c2.metric("Away Expected Goals (λ)", f"{lam_away:.2f}")
             c3.metric("Total Expected Goals", f"{exp_total:.2f}")
 
+            st.caption(f"Goalie effects — Home: {home_goalie_effect:+.3f} (applies to AWAY λ), "
+                       f"Away: {away_goalie_effect:+.3f} (applies to HOME λ)")
+
             st.markdown("### Win probabilities (Regulation / Overall incl. OT/SO)")
-            st.write(f"Regulation — Home: **{probs['home_reg']*100:.1f}%**, Away: **{probs['away_reg']*100:.1f}%**, Tie: **{probs['tie_reg']*100:.1f}%**")
-            st.write(f"Overall (after OT/SO) — Home: **{probs['home_overall']*100:.1f}%**, Away: **{probs['away_overall']*100:.1f}%**")
+            st.write(f"Regulation — Home: **{probs['home_reg']*100:.1f}%**, "
+                     f"Away: **{probs['away_reg']*100:.1f}%**, "
+                     f"Tie: **{probs['tie_reg']*100:.1f}%**")
+            st.write(f"Overall (after OT/SO) — Home: **{probs['home_overall']*100:.1f}%**, "
+                     f"Away: **{probs['away_overall']*100:.1f}%**")
